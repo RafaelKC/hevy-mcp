@@ -1,219 +1,155 @@
 using System.ComponentModel;
-using Microsoft.Extensions.Configuration;
-using HevyApiClient = HevyClient.Client.HevyClient;
 using HevyClient.Client;
 using HevyClient.DTOs;
+using HevyMcp.Auth;
 using ModelContextProtocol.Server;
 
 namespace HevyMcp;
 
 [McpServerToolType]
-public static class HevyTrainerTools
+public sealed class HevyTrainerTools
 {
-    private static readonly Lazy<HevyApiClient> HevyClient = new(CreateClient);
-
-    private static HevyApiClient Client => HevyClient.Value;
-
     public sealed record HevyConfigStatus(
         string EnvironmentName,
         string? BaseUrl,
-        bool HasApiKey,
-        string ApiKeySource,
-        string BaseUrlSource);
+        bool HasBearer,
+        bool HasHevyApiKeyInRequest);
 
-    [McpServerTool, Description("Diagnose Hevy configuration (env/appsettings). Does not reveal the API key.")]
-    public static HevyConfigStatus GetHevyConfigStatus()
+    private readonly IHttpContextAccessor _httpContextAccessor;
+
+    public HevyTrainerTools(IHttpContextAccessor httpContextAccessor)
     {
-        var envName =
-            Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ??
-            Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT") ??
-            "Production";
-
-        var (apiKey, apiKeySource, baseUrl, baseUrlSource) = ReadHevyConfig(envName);
-
-        return new HevyConfigStatus(
-            EnvironmentName: envName,
-            BaseUrl: string.IsNullOrWhiteSpace(baseUrl) ? null : baseUrl,
-            HasApiKey: !string.IsNullOrWhiteSpace(apiKey),
-            ApiKeySource: apiKeySource,
-            BaseUrlSource: baseUrlSource);
+        _httpContextAccessor = httpContextAccessor;
     }
 
-    private static HevyApiClient CreateClient()
+    private (string HevyApiKey, string? BaseUrl) GetRequestHevyConfig()
     {
-        var envName =
-            Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ??
-            Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT") ??
-            "Production";
+        var ctx = _httpContextAccessor.HttpContext
+                  ?? throw new InvalidOperationException("No HttpContext available. This tool must be called over HTTP transport.");
 
-        var (apiKey, _, baseUrl, _) = ReadHevyConfig(envName);
-
+        var apiKey = ctx.Items[HevyMcpTokenMiddleware.HttpContextItemApiKey] as string;
         if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            throw new InvalidOperationException(
-                "Missing Hevy API key. Set HEVY_API_KEY (or one of MCP_HEVY_API_KEY, HEVY_APIKEY, HEVY_TOKEN, API_KEY) or put Hevy:ApiKey in appsettings.json/appsettings.Development.json.");
-        }
+            throw new InvalidOperationException("Missing Hevy API key in request context. Provide a valid Authorization: Bearer token.");
 
+        var baseUrl = ctx.Items[HevyMcpTokenMiddleware.HttpContextItemBaseUrl] as string;
+        return (apiKey, baseUrl);
+    }
+
+    private HevyClient.Client.HevyClient CreateClientForRequest()
+    {
+        var (apiKey, baseUrl) = GetRequestHevyConfig();
         var options = !string.IsNullOrWhiteSpace(baseUrl) ? new HevyApiOptions { BaseUrl = baseUrl } : null;
-
-        return new HevyApiClient(apiKey, options);
-    }
-
-    private static (string? ApiKey, string ApiKeySource, string? BaseUrl, string BaseUrlSource) ReadHevyConfig(string envName)
-    {
-        string? apiKey = null;
-        string apiKeySource = "none";
-
-        string? baseUrl = null;
-        string baseUrlSource = "default";
-
-        apiKey = Environment.GetEnvironmentVariable("HEVY_API_KEY");
-        if (!string.IsNullOrWhiteSpace(apiKey)) apiKeySource = "env:HEVY_API_KEY";
-
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            apiKey = Environment.GetEnvironmentVariable("MCP_HEVY_API_KEY");
-            if (!string.IsNullOrWhiteSpace(apiKey)) apiKeySource = "env:MCP_HEVY_API_KEY";
-        }
-
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            apiKey = Environment.GetEnvironmentVariable("HEVY_APIKEY");
-            if (!string.IsNullOrWhiteSpace(apiKey)) apiKeySource = "env:HEVY_APIKEY";
-        }
-
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            apiKey = Environment.GetEnvironmentVariable("HEVY_TOKEN");
-            if (!string.IsNullOrWhiteSpace(apiKey)) apiKeySource = "env:HEVY_TOKEN";
-        }
-
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            apiKey = Environment.GetEnvironmentVariable("API_KEY");
-            if (!string.IsNullOrWhiteSpace(apiKey)) apiKeySource = "env:API_KEY";
-        }
-
-        baseUrl = Environment.GetEnvironmentVariable("HEVY_BASE_URL");
-        if (!string.IsNullOrWhiteSpace(baseUrl)) baseUrlSource = "env:HEVY_BASE_URL";
-
-        // appsettings fallback (output folder)
-        if (string.IsNullOrWhiteSpace(apiKey) || string.IsNullOrWhiteSpace(baseUrl))
-        {
-            var config = new ConfigurationBuilder()
-                .SetBasePath(AppContext.BaseDirectory)
-                .AddJsonFile("appsettings.json", optional: true, reloadOnChange: false)
-                .AddJsonFile($"appsettings.{envName}.json", optional: true, reloadOnChange: false)
-                .Build();
-
-            if (string.IsNullOrWhiteSpace(apiKey))
-            {
-                apiKey = config["Hevy:ApiKey"];
-                if (!string.IsNullOrWhiteSpace(apiKey)) apiKeySource = $"appsettings:{envName}";
-            }
-
-            if (string.IsNullOrWhiteSpace(baseUrl))
-            {
-                baseUrl = config["Hevy:BaseUrl"];
-                if (!string.IsNullOrWhiteSpace(baseUrl)) baseUrlSource = $"appsettings:{envName}";
-            }
-        }
-
-        // Default base URL if nothing is configured anywhere
-        baseUrl ??= "https://hevy.com";
-
-        return (apiKey, apiKeySource, baseUrl, baseUrlSource);
+        return new HevyClient.Client.HevyClient(apiKey, options);
     }
 
     [McpServerTool, Description("Get authenticated user info.")]
-    public static Task<UserInfoResponse> GetUserInfo() => Client.GetUserInfoAsync();
+    public Task<UserInfoResponse> GetUserInfo() => CreateClientForRequest().GetUserInfoAsync();
+
+    [McpServerTool, Description("Diagnose request auth context. Does not reveal secrets.")]
+    public HevyConfigStatus GetHevyConfigStatus()
+    {
+        var ctx = _httpContextAccessor.HttpContext;
+        var envName = Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT")
+                      ?? Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")
+                      ?? "Production";
+
+        var hasBearer = ctx?.Request.Headers.Authorization.ToString().StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) == true;
+        var hasKey = ctx?.Items.ContainsKey(HevyMcpTokenMiddleware.HttpContextItemApiKey) == true;
+        var baseUrl = ctx?.Items[HevyMcpTokenMiddleware.HttpContextItemBaseUrl] as string;
+
+        return new HevyConfigStatus(
+            EnvironmentName: envName,
+            BaseUrl: baseUrl,
+            HasBearer: hasBearer,
+            HasHevyApiKeyInRequest: hasKey);
+    }
 
     // ----------------------------
     // Workouts
     // ----------------------------
 
     [McpServerTool, Description("Get a paginated list of workouts.")]
-    public static Task<PaginatedWorkoutsResponse> GetWorkouts(int page = 1, int pageSize = 5) =>
-        Client.GetWorkoutsAsync(page, pageSize);
+    public Task<PaginatedWorkoutsResponse> GetWorkouts(int page = 1, int pageSize = 5) =>
+        CreateClientForRequest().GetWorkoutsAsync(page, pageSize);
 
     [McpServerTool, Description("Get the total number of workouts.")]
-    public static Task<WorkoutCountResponse> GetWorkoutCount() => Client.GetWorkoutCountAsync();
+    public Task<WorkoutCountResponse> GetWorkoutCount() => CreateClientForRequest().GetWorkoutCountAsync();
 
     [McpServerTool, Description("Get a single workout by workoutId.")]
-    public static Task<Workout> GetWorkout(string workoutId) => Client.GetWorkoutAsync(workoutId);
+    public Task<Workout> GetWorkout(string workoutId) => CreateClientForRequest().GetWorkoutAsync(workoutId);
 
     [McpServerTool, Description("Create a new workout.")]
-    public static Task<Workout> CreateWorkout(PostWorkoutsRequestBody request) => Client.CreateWorkoutAsync(request);
+    public Task<Workout> CreateWorkout(PostWorkoutsRequestBody request) => CreateClientForRequest().CreateWorkoutAsync(request);
 
     [McpServerTool, Description("Update an existing workout.")]
-    public static Task<Workout> UpdateWorkout(string workoutId, PostWorkoutsRequestBody request) =>
-        Client.UpdateWorkoutAsync(workoutId, request);
+    public Task<Workout> UpdateWorkout(string workoutId, PostWorkoutsRequestBody request) =>
+        CreateClientForRequest().UpdateWorkoutAsync(workoutId, request);
 
     [McpServerTool, Description("Get paged workout events updated/deleted since a given date.")]
-    public static Task<PaginatedWorkoutEventsResponse> GetWorkoutEvents(
+    public Task<PaginatedWorkoutEventsResponse> GetWorkoutEvents(
         int page = 1,
         int pageSize = 5,
         DateTimeOffset? since = null) =>
-        Client.GetWorkoutEventsAsync(page, pageSize, since);
+        CreateClientForRequest().GetWorkoutEventsAsync(page, pageSize, since);
 
     // ----------------------------
     // Routines
     // ----------------------------
 
     [McpServerTool, Description("Get a paginated list of routines.")]
-    public static Task<PaginatedRoutinesResponse> GetRoutines(int page = 1, int pageSize = 5) =>
-        Client.GetRoutinesAsync(page, pageSize);
+    public Task<PaginatedRoutinesResponse> GetRoutines(int page = 1, int pageSize = 5) =>
+        CreateClientForRequest().GetRoutinesAsync(page, pageSize);
 
     [McpServerTool, Description("Get a routine by routineId.")]
-    public static Task<Routine> GetRoutine(string routineId) => Client.GetRoutineAsync(routineId);
+    public Task<Routine> GetRoutine(string routineId) => CreateClientForRequest().GetRoutineAsync(routineId);
 
     [McpServerTool, Description("Create a new routine.")]
-    public static Task<Routine> CreateRoutine(PostRoutinesRequestBody request) => Client.CreateRoutineAsync(request);
+    public Task<Routine> CreateRoutine(PostRoutinesRequestBody request) => CreateClientForRequest().CreateRoutineAsync(request);
 
     [McpServerTool, Description("Update an existing routine.")]
-    public static Task<Routine> UpdateRoutine(string routineId, PutRoutinesRequestBody request) =>
-        Client.UpdateRoutineAsync(routineId, request);
+    public Task<Routine> UpdateRoutine(string routineId, PutRoutinesRequestBody request) =>
+        CreateClientForRequest().UpdateRoutineAsync(routineId, request);
 
     // ----------------------------
     // Exercise templates
     // ----------------------------
 
     [McpServerTool, Description("Get a paginated list of exercise templates.")]
-    public static Task<PaginatedExerciseTemplatesResponse> GetExerciseTemplates(int page = 1, int pageSize = 50) =>
-        Client.GetExerciseTemplatesAsync(page, pageSize);
+    public Task<PaginatedExerciseTemplatesResponse> GetExerciseTemplates(int page = 1, int pageSize = 50) =>
+        CreateClientForRequest().GetExerciseTemplatesAsync(page, pageSize);
 
     [McpServerTool, Description("Get an exercise template by id.")]
-    public static Task<ExerciseTemplate> GetExerciseTemplate(string exerciseTemplateId) =>
-        Client.GetExerciseTemplateAsync(exerciseTemplateId);
+    public Task<ExerciseTemplate> GetExerciseTemplate(string exerciseTemplateId) =>
+        CreateClientForRequest().GetExerciseTemplateAsync(exerciseTemplateId);
 
     [McpServerTool, Description("Create a new custom exercise template.")]
-    public static Task<CreateCustomExerciseResponse> CreateCustomExerciseTemplate(CreateCustomExerciseRequestBody request) =>
-        Client.CreateCustomExerciseTemplateAsync(request);
+    public Task<CreateCustomExerciseResponse> CreateCustomExerciseTemplate(CreateCustomExerciseRequestBody request) =>
+        CreateClientForRequest().CreateCustomExerciseTemplateAsync(request);
 
     // ----------------------------
     // Routine folders
     // ----------------------------
 
     [McpServerTool, Description("Get a paginated list of routine folders.")]
-    public static Task<PaginatedRoutineFoldersResponse> GetRoutineFolders(int page = 1, int pageSize = 10) =>
-        Client.GetRoutineFoldersAsync(page, pageSize);
+    public Task<PaginatedRoutineFoldersResponse> GetRoutineFolders(int page = 1, int pageSize = 10) =>
+        CreateClientForRequest().GetRoutineFoldersAsync(page, pageSize);
 
     [McpServerTool, Description("Get a routine folder by its id.")]
-    public static Task<RoutineFolder> GetRoutineFolder(int folderId) => Client.GetRoutineFolderAsync(folderId);
+    public Task<RoutineFolder> GetRoutineFolder(int folderId) => CreateClientForRequest().GetRoutineFolderAsync(folderId);
 
     [McpServerTool, Description("Create a new routine folder.")]
-    public static Task<RoutineFolder> CreateRoutineFolder(PostRoutineFolderRequestBody request) =>
-        Client.CreateRoutineFolderAsync(request);
+    public Task<RoutineFolder> CreateRoutineFolder(PostRoutineFolderRequestBody request) =>
+        CreateClientForRequest().CreateRoutineFolderAsync(request);
 
     // ----------------------------
     // Exercise history
     // ----------------------------
 
     [McpServerTool, Description("Get exercise history for a specific exercise template.")]
-    public static Task<ExerciseHistoryResponse> GetExerciseHistory(
+    public Task<ExerciseHistoryResponse> GetExerciseHistory(
         string exerciseTemplateId,
         DateTimeOffset? startDate = null,
         DateTimeOffset? endDate = null) =>
-        Client.GetExerciseHistoryAsync(exerciseTemplateId, startDate, endDate);
+        CreateClientForRequest().GetExerciseHistoryAsync(exerciseTemplateId, startDate, endDate);
 }
 
