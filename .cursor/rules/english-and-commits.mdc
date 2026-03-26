@@ -1,0 +1,10 @@
+---
+description: English for code and commits; commit workflow expectations for this repo
+alwaysApply: true
+---
+
+# Language and Git
+
+- Write **all** of the following in **English**: source code, comments, identifiers (unless an external API or spec forces another language), `README`, docs, and **git commit messages**.
+- Use **Conventional Commits** in English when suggesting or writing commit messages (e.g. `feat:`, `fix:`, `docs:`, `chore:`).
+- When a task changes the codebase and the user has not said otherwise, **propose** a single clear English commit message (and the `git add` / `git commit` commands if helpful). Do not commit unless the user asks to run git write operations.

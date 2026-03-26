@@ -1,0 +1,6 @@
+{
+    "omnisharp.dotNetCliPaths": [
+        "/home/rchicovis/.local/bin"
+    ],
+    "omnisharp.dotnetPath": "/home/rchicovis/.local/bin/dotnet"
+}
