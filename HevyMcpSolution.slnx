@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="HevyClient/HevyClient.csproj" />
+  <Project Path="HevyMcp/HevyMcp.csproj" />
+</Solution>

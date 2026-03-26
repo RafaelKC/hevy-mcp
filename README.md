@@ -1,4 +1,4 @@
-# hevy-mcp
+# HevyMcp
 
 A C# [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server using **stdio** transport, intended to connect the [Hevy](https://www.hevyapp.com/) app to clients such as Cursor.
 
@@ -29,7 +29,7 @@ The process speaks MCP over **stdin/stdout**. Do not treat it as an HTTP service
       "args": [
         "run",
         "--project",
-        "${workspaceFolder}/hevy-mcp.csproj",
+            "${workspaceFolder}/HevyMcp/HevyMcp.csproj",
         "--no-launch-profile"
       ]
     }

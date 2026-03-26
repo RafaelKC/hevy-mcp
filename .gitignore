@@ -48,3 +48,6 @@ Thumbs.db
 !.env.example
 *.pfx
 secrets.json
+
+## HevyMcp secrets (template + local dev override)
+HevyMcp/appsettings.Development.json
